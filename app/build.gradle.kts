@@ -15,10 +15,19 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        // 复用默认 debug keystore 签名，使 release APK 也可直接安装（无需用户配置 keystore）
+        getByName("debug") {
+            enableV1Signing = true
+            enableV2Signing = true
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
+            signingConfig = signingConfigs.getByName("debug")
         }
         debug {
             isMinifyEnabled = false
