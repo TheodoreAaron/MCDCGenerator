@@ -21,6 +21,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -109,7 +114,10 @@ fun McdcApp(viewModel: McdcViewModel = viewModel()) {
         if (copyAckTick > 0) snackbarHostState.showSnackbar("✅ 已复制真值表到剪贴板")
     }
 
-    Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { padding ->
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        bottomBar = { QuickInsertBar(viewModel) },
+    ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -142,7 +150,8 @@ fun McdcApp(viewModel: McdcViewModel = viewModel()) {
 }
 
 /**
- * 输入面板：表达式输入框 + 快捷插入 + 起始基准切换 + 生成/复制按钮。
+ * 输入面板：表达式输入框 + 起始基准切换 + 生成/复制按钮。
+ * （AND/OR/NOT/() 快捷插入已移至底部 QuickInsertBar，见需求）
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -183,20 +192,6 @@ private fun InputPanel(
                 },
                 modifier = Modifier.fillMaxWidth(),
             )
-
-            // ── 快捷符号插入 ────────────────────────────
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                // 在光标处插入（而不是拼到末尾）：用户光标在表达式任意位置时点击，
-                // 符号都会插入到光标之后，且光标自动移到符号后面，便于连续输入。
-                QuickChip("AND") { viewModel.insertAtCursor(" & ") }
-                QuickChip("OR")  { viewModel.insertAtCursor(" | ") }
-                QuickChip("NOT") { viewModel.insertAtCursor("~") }
-                QuickChip("(")   { viewModel.insertAtCursor("(") }
-                QuickChip(")")   { viewModel.insertAtCursor(")") }
-            }
 
             // ── 起始基准切换 ────────────────────────────
             Row(
@@ -279,6 +274,51 @@ private fun QuickChip(label: String, onClick: () -> Unit) {
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
             )
+        }
+    }
+}
+
+/**
+ * 底部快捷符号栏：AND / OR / NOT / ( / )。
+ *
+ * 设计目标（见需求）：把这组插入按钮固定到屏幕最底部，且当手机软键盘弹起时，
+ * 通过 windowInsetsPadding(navigationBars ∪ ime) 让整条栏自动抬升到键盘之上，
+ * 始终保持可点击——用户在输入框打字时无需收起键盘即可插入逻辑符号。
+ *
+ * 说明：本 App 的 AndroidManifest 已将 windowSoftInputMode 设为 adjustResize，
+ * 软键盘弹出时整个窗口会收窄到键盘上方，bottomBar 自然落在键盘之上；
+ * 这里的 imePadding 主要作为「键盘未触发窗口 resize 的设备/ROM」的安全兜底，
+ * 同时 union(navigationBars) 避免被底部导航条（手势/三键）遮挡。
+ */
+@Composable
+private fun QuickInsertBar(viewModel: McdcViewModel) {
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
+    ) {
+        Column {
+            // 顶部细分隔线，标示这是一条独立工具栏
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            ) {
+                QuickChip("AND") { viewModel.insertAtCursor(" & ") }
+                QuickChip("OR")  { viewModel.insertAtCursor(" | ") }
+                QuickChip("NOT") { viewModel.insertAtCursor("~") }
+                QuickChip("(")   { viewModel.insertAtCursor("(") }
+                QuickChip(")")   { viewModel.insertAtCursor(")") }
+            }
         }
     }
 }
