@@ -175,7 +175,7 @@ private fun InputPanel(
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 trailingIcon = {
-                    if (state.expression.isNotEmpty()) {
+                    if (state.expression.text.isNotEmpty()) {
                         IconButton(onClick = viewModel::clear) {
                             Icon(Icons.Filled.Clear, contentDescription = "清空")
                         }
@@ -189,11 +189,13 @@ private fun InputPanel(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                QuickChip("AND") { viewModel.onExpressionChange(state.expression + " & ") }
-                QuickChip("OR")  { viewModel.onExpressionChange(state.expression + " | ") }
-                QuickChip("NOT") { viewModel.onExpressionChange(state.expression + "~") }
-                QuickChip("(")   { viewModel.onExpressionChange(state.expression + "(") }
-                QuickChip(")")   { viewModel.onExpressionChange(state.expression + ")") }
+                // 在光标处插入（而不是拼到末尾）：用户光标在表达式任意位置时点击，
+                // 符号都会插入到光标之后，且光标自动移到符号后面，便于连续输入。
+                QuickChip("AND") { viewModel.insertAtCursor(" & ") }
+                QuickChip("OR")  { viewModel.insertAtCursor(" | ") }
+                QuickChip("NOT") { viewModel.insertAtCursor("~") }
+                QuickChip("(")   { viewModel.insertAtCursor("(") }
+                QuickChip(")")   { viewModel.insertAtCursor(")") }
             }
 
             // ── 起始基准切换 ────────────────────────────
