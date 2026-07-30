@@ -61,12 +61,13 @@ jobs:
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 30
 
-      # 自动发布到 GitHub Releases（每次 push 更新同一个 nightly 发布，附上两个 APK）
+      # 自动发布到 GitHub Releases：每次构建用唯一 tag（nightly-<run_number>）保留独立版本，
+      # 所有历史构建都会累积保留；最新的一个标记为 Latest 方便下载。
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: nightly
-          name: Nightly Build (${{ github.run_number }})
+          tag_name: nightly-${{ github.run_number }}
+          name: Nightly Build #${{ github.run_number }}
           prerelease: true
           make_latest: true
           files: |
@@ -75,6 +76,7 @@ jobs:
           body: |
             🤖 自动构建的 MC/DC 真值表生成器安装包
             - 提交: ${{ github.sha }}
+            - 构建序号: ${{ github.run_number }}
             - Debug / Release 两个 APK 见下方 Assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
