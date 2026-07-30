@@ -71,13 +71,15 @@ jobs:
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: MC/DC Generator ${{ steps.ver.outputs.tag }}
-          prerelease: false
-          make_latest: true
+          # tag 含 '-'（如 v0.1.0-beta）自动标记为预发布，且不抢占 Latest；纯 v* 为正式版
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
           files: |
             app/build/outputs/apk/release/app-release.apk
             app/build/outputs/apk/debug/app-debug.apk
           body: |
-            🚀 正式发行版本 ${{ steps.ver.outputs.tag }}
+            🚀 发行版本 ${{ steps.ver.outputs.tag }}
+            类型: ${{ contains(github.ref_name, '-') && '🧪 测试版 (pre-release)' || '✅ 正式版' }}
             - 提交: ${{ github.sha }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
