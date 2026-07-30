@@ -92,6 +92,8 @@ jobs:
           # tag 含 '-'（如 v0.1.0-beta）自动标记为预发布，且不抢占 Latest；纯 v* 为正式版
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ !contains(github.ref_name, '-') }}
+          # 允许重发同一 tag（重推 tag 即覆盖更新该版本，便于修复重发）
+          allow_override: true
           files: |
             app/build/outputs/apk/release/app-release.apk
             app/build/outputs/apk/debug/app-debug.apk
