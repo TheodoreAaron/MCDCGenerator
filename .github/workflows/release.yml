@@ -52,17 +52,22 @@ jobs:
       # 从 Secret 解码 keystore 到临时文件，并通过环境变量注入 Gradle；
       # 未配置 Secrets 时 Gradle 自动回退到默认 debug key，本地/早期环境仍可正常构建。
       - name: Decode release keystore
-        if: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' }}
+        # 注意：secrets 上下文不能在 if: 条件中使用，故把密钥放入 env，在脚本里判断是否为空
         env:
           KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PW: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          STORE_PW: ${{ secrets.RELEASE_STORE_PASSWORD }}
         run: |
-          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release-key.jks"
-          {
-            echo "RELEASE_KEYSTORE=$RUNNER_TEMP/release-key.jks"
-            echo "RELEASE_KEY_ALIAS=${{ secrets.RELEASE_KEY_ALIAS }}"
-            echo "RELEASE_KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD }}"
-            echo "RELEASE_STORE_PASSWORD=${{ secrets.RELEASE_STORE_PASSWORD }}"
-          } >> "$GITHUB_ENV"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release-key.jks"
+            {
+              echo "RELEASE_KEYSTORE=$RUNNER_TEMP/release-key.jks"
+              echo "RELEASE_KEY_ALIAS=$KEY_ALIAS"
+              echo "RELEASE_KEY_PASSWORD=$KEY_PW"
+              echo "RELEASE_STORE_PASSWORD=$STORE_PW"
+            } >> "$GITHUB_ENV"
+          fi
 
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon
