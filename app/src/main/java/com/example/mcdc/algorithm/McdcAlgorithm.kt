@@ -4,27 +4,32 @@ import com.example.mcdc.algorithm.ExprParser.extractVariables
 import com.example.mcdc.algorithm.ExprParser.parse
 import com.example.mcdc.model.McdcResult
 import com.example.mcdc.model.TruthRow
+import java.util.ArrayDeque
 import kotlin.math.abs
 
 /**
- * MC/DC 核心算法：局部连续性优先（Locality-First）+ 判定严格交替策略。
+ * MC/DC 核心算法。
  *
- * 设计基调（PRD §4）：视觉局部连续性（每个变量的测试对在矩阵中**严格相邻**）是
- * **最高优先级**，高于"绝对最小化用例总数"。在此基础上追加**判定（out）列严格
- * 0/1 交替**的约束——相邻两用例的 decision 必须相反，形成 0101…/1010… 序列。
+ * 主算法 [solveMinimal] 用 **BFS 最短路径** 在「(当前用例行, 已覆盖变量集合)」状态空间上求解
+ * 最小真值表，并严格满足需求文档的三大约束：
+ *   ① 每个变量都存在一对相邻用例（Hamming 距离 = 1、其余变量全同、判定反转）—— 即 MC/DC 独立影响对；
+ *   ② out（判定）列严格 0/1 交替；
+ *   ③ 在上述约束下用例数最少。
  *
- * Phase 1/2 生成全部数学合法的 MC/DC 候选对；Phase 3&4 采用**多米诺链式
- * （Domino Chaining）**拼接：沿 `orderedCases` 这条不断增长的链做前向拼接，
- * 凡是存在候选对包含链尾(tail)的未覆盖变量，就「只追加缺失行」，使相邻两块共用
- * 同一行 —— 这是最大化用例重叠、把总列数压到最少的关键（旧贪心策略每变量固定
- * +2 列，链式通常只 +1 列）。链断裂则复制一对相邻行重启独立新链，并始终以
- * `require(abs(colA - colB) == 1)` 强校验高亮列严格相邻，且以
- * `require(decision[i] != decision[i+1])` 强校验判定列严格交替。
+ * 转移规则（图边）：
+ *   - 翻转恰好 1 个变量且判定反转 → 覆盖该变量（covers that var），计入已覆盖集合；
+ *   - 翻转 2~[MAX_JUMP_H] 个变量且判定反转 → "跳跃行"（jump），不覆盖任何变量，仅用于衔接不同变量的影响对；
+ *   两类边都要求相邻两行判定相反（严格交替）。BFS 以用例数为代价求最短路，天然得到最小解。
+ *
+ * 旧版 [dominoChain]（局部相邻优先 + 多米诺链式）作为兜底保留：当 BFS 因极端情形未找到解时回退使用。
  */
 object McdcAlgorithm {
 
     /** 变量数量上限，防止 2^n 爆炸导致 OOM（PRD §7）。 */
     const val MAX_VARIABLES = 10
+
+    /** 跳跃行允许的最大汉明距离（用于衔接不同变量的影响对，不覆盖变量）。 */
+    private const val MAX_JUMP_H = 3
 
     fun generate(expression: String, startFromTrue: Boolean): McdcResult {
         val ast = parse(expression)
@@ -34,16 +39,170 @@ object McdcAlgorithm {
             throw McdcParseException("变量数量(${variables.size})超过上限 $MAX_VARIABLES，请减少变量")
         }
 
-        // Phase 1: 基础真值表
         val baseRows = generateBaseTable(variables, ast, startFromTrue)
-        // Phase 2: 候选对提取（枚举全部数学合法的 MC/DC 候选对）
+        // 主算法：BFS 精确最小解
+        val bfs = solveMinimal(baseRows, variables, startFromTrue)
+        if (bfs != null) return bfs
+        // 兜底：旧贪心链式（极少触发）
         val candidates = extractCandidatePairs(variables, baseRows)
-        // Phase 3 & 4: 多米诺链式拼接（Locality-First + 严格交替，最大化用例重叠）
         val (orderedCases, highlight, uncoverable) = dominoChain(candidates, startFromTrue)
-
         return McdcResult(
             variables = variables,
             orderedCases = orderedCases,
+            highlight = highlight,
+            uncoverable = uncoverable
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // BFS 精确最小解
+    // ------------------------------------------------------------------
+    private fun solveMinimal(
+        baseRows: List<TruthRow>,
+        variables: List<String>,
+        startFromTrue: Boolean
+    ): McdcResult? {
+        val n = variables.size
+        val N = baseRows.size
+        // 每行编码为位向量（变量按下标映射到位）
+        val bit = IntArray(N)
+        for (i in baseRows.indices) {
+            var bv = 0
+            for ((bitIdx, v) in variables.withIndex()) {
+                bv = bv or ((baseRows[i].values[v] ?: 0) shl bitIdx)
+            }
+            bit[i] = bv
+        }
+        val dec = IntArray(N) { baseRows[it].decision }
+        // 位向量 -> 行索引 直接寻址表（O(1) 邻居查找）
+        val bvToIndex = IntArray(1 shl n) { -1 }
+        for (i in 0 until N) bvToIndex[bit[i]] = i
+
+        // 邻居生成：翻转 1..MAX_JUMP_H 个变量且判定反转的行；返回 (邻居行索引, 覆盖位)
+        fun neighbors(i: Int): List<Pair<Int, Int>> {
+            val res = mutableListOf<Pair<Int, Int>>()
+            for (k in 1..MAX_JUMP_H) {
+                if (k == 1) {
+                    for (v in 0 until n) {
+                        val flipped = 1 shl v
+                        val j = bvToIndex[bit[i] xor flipped]
+                        if (j < 0 || dec[i] == dec[j]) continue
+                        res.add(j to flipped)
+                    }
+                } else if (k == 2) {
+                    for (a in 0 until n) for (b in a + 1 until n) {
+                        val flipped = (1 shl a) or (1 shl b)
+                        val j = bvToIndex[bit[i] xor flipped]
+                        if (j < 0 || dec[i] == dec[j]) continue
+                        res.add(j to 0)
+                    }
+                } else {
+                    for (a in 0 until n) for (b in a + 1 until n) for (c in b + 1 until n) {
+                        val flipped = (1 shl a) or (1 shl b) or (1 shl c)
+                        val j = bvToIndex[bit[i] xor flipped]
+                        if (j < 0 || dec[i] == dec[j]) continue
+                        res.add(j to 0)
+                    }
+                }
+            }
+            return res
+        }
+
+        // 可覆盖变量集合
+        var coverable = 0
+        for (i in 0 until N) for ((_, cm) in neighbors(i)) coverable = coverable or cm
+        val target = coverable
+        val FULL = 1 shl n
+        val INF = Int.MAX_VALUE
+        val size = N * FULL
+        val dist = IntArray(size) { INF }
+        val parent = IntArray(size) { -1 }       // 前驱行索引，-2 表示起点
+        val prevmask = IntArray(size) { -1 }    // 前驱掩码，-1 表示起点
+        val startDec = if (startFromTrue) 1 else 0
+        val queue: ArrayDeque<Int> = ArrayDeque()
+        for (i in 0 until N) {
+            if (dec[i] == startDec) {
+                val key = i * FULL
+                if (dist[key] > 1) {
+                    dist[key] = 1
+                    parent[key] = -2
+                    prevmask[key] = -1
+                    queue.add(key)
+                }
+            }
+        }
+        while (queue.isNotEmpty()) {
+            val state = queue.removeFirst()
+            val i = state / FULL
+            val mask = state % FULL
+            val d = dist[state]
+            for ((j, cm) in neighbors(i)) {
+                val nm = mask or cm
+                val nd = d + 1
+                val nk = j * FULL + nm
+                if (nd < dist[nk]) {
+                    dist[nk] = nd
+                    parent[nk] = i
+                    prevmask[nk] = mask
+                    queue.add(nk)
+                }
+            }
+        }
+        // 选取到达 target 的最短终态
+        var best = -1
+        var bestd = INF
+        for (i in 0 until N) {
+            val d = dist[i * FULL + target]
+            if (d < bestd) { bestd = d; best = i }
+        }
+        if (bestd == INF) return null
+
+        // 沿 (前驱行, 前驱掩码) 回溯
+        val path = mutableListOf<Int>()
+        var ci = best
+        var cmask = target
+        while (true) {
+            path.add(ci)
+            val p = parent[ci * FULL + cmask]
+            if (p == -2) break
+            val pm = prevmask[ci * FULL + cmask]
+            ci = p
+            cmask = pm
+        }
+        path.reverse()
+
+        // 组装有序用例
+        val ordered = path.map { baseRows[it] }
+        // 高亮：每条 Hamming=1 的相邻对即某变量的独立影响对
+        val highlight = LinkedHashMap<String, Pair<Int, Int>>()
+        for (k in 0 until path.size - 1) {
+            val xor = bit[path[k]] xor bit[path[k + 1]]
+            if (Integer.bitCount(xor) == 1) {
+                val v = Integer.numberOfTrailingZeros(xor)
+                val name = variables[v]
+                if (!highlight.containsKey(name)) highlight[name] = k to (k + 1)
+            }
+        }
+        // 不可覆盖变量
+        val uncoverable = (0 until n)
+            .filter { (coverable and (1 shl it)) == 0 }
+            .map { variables[it] }
+            .toSet()
+
+        // 强校验：① 高亮对严格相邻 ② out 严格交替
+        for ((_, p) in highlight) {
+            require(abs(p.first - p.second) == 1) {
+                "算法内部错误：变量 $variables 的高亮列不相邻 (${p.first}, ${p.second})"
+            }
+        }
+        for (i in 0 until ordered.size - 1) {
+            require(ordered[i].decision != ordered[i + 1].decision) {
+                "算法内部错误：判定列未严格交替 (位置 $i,${i + 1} 均为 ${ordered[i].decision})"
+            }
+        }
+        return McdcResult(
+            variables = variables,
+            orderedCases = ordered,
             highlight = highlight,
             uncoverable = uncoverable
         )
@@ -110,27 +269,8 @@ object McdcAlgorithm {
     }
 
     // ------------------------------------------------------------------
-    // Phase 3 & 4: 多米诺链式拼接（Domino Chaining，Locality-First + 严格交替）
-    //
-    // 核心约束（高于压缩率）：
-    //   ★ out（判定）列必须严格 0/1 交替 —— 即 orderedCases 的 decision 序列
-    //     必须是 0,1,0,1,… 或 1,0,1,0,… 相邻两位绝不相同。
-    //
-    //   ★ 每个可覆盖变量 V 必须分配到一对严格相邻的用例 (i, i+1)，
-    //     且该对是 V 的合法 MC/DC 独立影响对（V 取 0/1、其余变量相同、判定反转）。
-    //     由于 MC/DC 对定义上两行 decision 必不同，天然贡献一个 0→1 或 1→0 的交替。
-    //
-    //   ★ 在满足以上两点的前提下，链式重叠最大化、复制行最小化，使总用例数最少。
-    //
-    // 算法（贪心 + 链式，与 Python 原型一致）：
-    //   维护 nextDec = 下一行应有的判定值（交替约束）。
-    //   - 命中：若未覆盖变量 V 存在候选对 (tail, other) 且 other.decision == nextDec，
-    //     则只追加 other（复用 tail），相邻对即归 V。nextDec 翻转。
-    //   - 断裂：tail 无法接续时，选未覆盖变量 V 的一对 (lo dec=nextDec, hi dec=1-nextDec)，
-    //     复制两行放入（仍相邻、仍交替、仍是 V 的合法对）。nextDec 不变（加了两行后回到原值）。
-    //   起始：取候选对最少的变量（most-constrained-first），选其一对 (dec=startDec, 1-startDec)。
-    //
-    // 强校验：①相邻 highlight 下标差为 1；②ordered 的 decision 严格交替。
+    // 兜底算法：多米诺链式拼接（Locality-First + 严格交替）
+    // 仅当 BFS 主算法未找到解时回退使用。
     // ------------------------------------------------------------------
     private fun dominoChain(
         candidates: Map<String, List<Pair<TruthRow, TruthRow>>>,
