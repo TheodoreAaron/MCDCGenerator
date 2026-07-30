@@ -48,13 +48,29 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      # 当前 build.gradle 已用 debug key 给 release 签名（够 sideload，不能上架）。
-      # 暂无正式签名密钥，因此这里直接 assembleRelease 即可。
-      # 日后要正式签名见 docs/ci-cd.md §6。
+      # 固定签名密钥（可选）：仅当仓库配置了 RELEASE_KEYSTORE_BASE64 等 Secrets 时启用。
+      # 从 Secret 解码 keystore 到临时文件，并通过环境变量注入 Gradle；
+      # 未配置 Secrets 时 Gradle 自动回退到默认 debug key，本地/早期环境仍可正常构建。
+      - name: Decode release keystore
+        if: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release-key.jks"
+
       - name: Build Release APK
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && format('{0}/release-key.jks', runner.temp) || '' }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon
 
       - name: Build Debug APK
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && format('{0}/release-key.jks', runner.temp) || '' }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
         run: ./gradlew assembleDebug --no-daemon
 
       - name: Resolve version

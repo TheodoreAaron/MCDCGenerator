@@ -31,11 +31,14 @@
    `git tag v1.0.0 && git push --tags` → 自动发版。版本即 tag，语义清晰、可追溯。
    （`workflow_dispatch` 作为可选手动入口保留，不依赖 tag 也能发，不影响 tag 主逻辑。）
 
-2. **暂时没有正式签名密钥**
-   `app/build.gradle.kts` 中 `release` 构建类型当前**复用 debug keystore** 签名
-   （`signingConfig = signingConfigs.getByName("debug")`）。
-   所以 release APK 能直接 sideload 安装，但**不能上架**（debug key 公开）。
-   因此本方案**不引入任何 GitHub Secrets**，build.gradle 也无需改动。
+2. **已引入固定签名密钥（统一签名，避免覆盖安装冲突）**
+   `app/build.gradle.kts` 中 `release`/`debug` 构建类型在 CI 注入 `RELEASE_KEYSTORE` 环境变量时，
+   使用**固定 keystore**（`releaseKey` signing config，alias=`mcdc`）签名；未注入时自动回退到默认 debug key，
+   保证本地/早期无密钥环境仍能构建。
+   固定 keystore 经 4 个 GitHub Secrets 注入：`RELEASE_KEYSTORE_BASE64`（base64 后的 .jks）、
+   `RELEASE_KEY_ALIAS`、`RELEASE_KEY_PASSWORD`、`RELEASE_STORE_PASSWORD`。
+   这样所有 CI 产出的 APK 共用同一签名，**彻底消除"不同 runner 各自生成 debug key 导致覆盖安装冲突"的问题**
+   （此前 v0.1.0-beta → beta2 的闪退就源于此）。
 
 3. **测试通道范围 = `push` 到 `main` + 所有 PR**（单 main 仓库最稳，不会一推就发版）。
 
@@ -129,10 +132,25 @@ jobs:
             ~/.gradle/wrapper
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties') }}
           restore-keys: ${{ runner.os }}-gradle-
-      # 沿用 build.gradle 现有 debug key 签名（暂无正式 key）
+      # 固定签名密钥（可选）：仅当配置了 Secrets 时启用；否则 Gradle 自动回退 debug key
+      - name: Decode release keystore
+        if: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release-key.jks"
       - name: Build Release APK
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && format('{0}/release-key.jks', runner.temp) || '' }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon
       - name: Build Debug APK
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && format('{0}/release-key.jks', runner.temp) || '' }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
         run: ./gradlew assembleDebug --no-daemon
       - name: Resolve version
         id: ver
@@ -147,12 +165,15 @@ jobs:
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: MC/DC Generator ${{ steps.ver.outputs.tag }}
-          make_latest: true
+          # tag 含 '-'（如 v0.1.0-beta）为预发布且不抢占 Latest；纯 v* 为正式版
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
           files: |
             app/build/outputs/apk/release/app-release.apk
             app/build/outputs/apk/debug/app-debug.apk
           body: |
-            🚀 正式发行 ${{ steps.ver.outputs.tag }}
+            🚀 发行版本 ${{ steps.ver.outputs.tag }}
+            类型: ${{ contains(github.ref_name, '-') && '🧪 测试版 (pre-release)' || '✅ 正式版' }}
             - 提交: ${{ github.sha }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -175,37 +196,25 @@ git push origin v1.0.0        # 或 git push --tags
 推送后 `release.yml` 自动运行，构建完成即在 Releases 页生成 `v1.0.0`（Latest）。
 日常推 `main` 只会跑 `ci.yml` 出调试包，不会发版。
 
-## 6. 后续升级：引入正式签名（未做，预留接口）
+## 6. 固定签名密钥（已实现）
 
-当需要"对外可信分发 / 上架"时，再补正式签名，无需改动通道结构：
+已落地统一签名，彻底消除"不同 CI runner 各自生成 debug key 导致覆盖安装签名冲突"的问题：
 
 1. 在 GitHub **Settings → Secrets** 配置 4 个变量：
    `RELEASE_KEYSTORE_BASE64`（base64 后的 .jks）、
    `RELEASE_KEY_ALIAS`、`RELEASE_KEY_PASSWORD`、`RELEASE_STORE_PASSWORD`。
-2. 把 `build.gradle.kts` 的 release 签名改成"有正式 key 就用、没有就回退 debug"：
+   - 密钥文件位于仓库外 `c:/Users/Ian/WorkBuddy/Claw/mcdc-release-key.jks`（alias=`mcdc`，密码 `McdcRelease2026!`，RSA 2048 / 10000 天），**不进 git**。
+   - 写入用 `_set_secrets.py`（pynacl 密封盒格式：临时公钥(32)‖nonce(24)‖密文）经 API `PUT /repos/{owner}/{repo}/actions/secrets/{name}` 写入。
+2. `build.gradle.kts` 的 `release`/`debug` 构建类型在 `RELEASE_KEYSTORE` 环境变量存在时使用 `releaseKey` signing config，否则回退默认 debug key（见 §3 实际 `build.gradle.kts`）。
+3. `release.yml` 在 build 步骤前 `echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release-key.jks"` 还原 keystore，并向 gradle 注入 4 个 env。
 
-   ```kotlin
-   signingConfigs {
-       create("release") {
-           val d = getByName("debug")
-           storeFile = d.storeFile; keyAlias = d.keyAlias
-           storePassword = d.storePassword; keyPassword = d.keyPassword
-           if (System.getenv("RELEASE_KEYSTORE") != null) {
-               storeFile = file(System.getenv("RELEASE_KEYSTORE"))
-               keyAlias = System.getenv("RELEASE_KEY_ALIAS")
-               storePassword = System.getenv("RELEASE_STORE_PASSWORD")
-               keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
-           }
-       }
-   }
-   buildTypes { release { signingConfig = signingConfigs.getByName("release") } }
-   ```
-3. 在 `release.yml` 的 build 步骤前加"还原 keystore（`echo $BASE64 | base64 -d > key.jks`）+ 注入 4 个 env"即可。
+> 升级到"对外可信分发 / 上架"时，把同一 keystore 提交到应用商店后台即可，通道结构无需再改。
 
 ## 7. 已知约束 / 注意事项
 
 - 本仓库无单元测试，`ci.yml` 当前只验证"能编译 + 出 debug 包"；加测试请见 §3 注释处。
-- release APK 现以 debug key 签名，仅在受信任的 sideload 场景使用；上架前必须走 §6。
+- release/debug APK 现已由**固定 keystore** 统一签名（CI 配 Secrets 时）；未配 Secrets 时回退 debug key，仅用于受信任 sideload。
 - 两个 workflow 共用同一套 Gradle 缓存 key，互不影响。
 - 若将来要"发版前人工审批"，给 `release.yml` 的 job 加 `environment: production` 并在
   GitHub 设置审批人即可（当前未启用，因为暂无此需求）。
+- **密钥安全**：`mcdc-release-key.jks` 与 `_set_secrets.py` 在仓库外，已 `gitignore`/不跟踪； Secrets 写入用仓库公钥密封盒加密，明文不落盘。

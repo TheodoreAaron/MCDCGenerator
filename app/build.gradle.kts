@@ -15,11 +15,24 @@ android {
         versionName = "1.0"
     }
 
+    // 固定发布密钥：仅当 CI 注入 RELEASE_KEYSTORE 环境变量时启用；
+    // 本地/早期无密钥环境自动回退到默认 debug key，保证任何环境都能构建。
+    val hasReleaseKey = !System.getenv("RELEASE_KEYSTORE").isNullOrBlank()
+
     signingConfigs {
-        // 复用默认 debug keystore 签名，使 release APK 也可直接安装（无需用户配置 keystore）
         getByName("debug") {
             enableV1Signing = true
             enableV2Signing = true
+        }
+        if (hasReleaseKey) {
+            create("releaseKey") {
+                storeFile = file(System.getenv("RELEASE_KEYSTORE")!!)
+                storePassword = System.getenv("RELEASE_STORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+                enableV1Signing = true
+                enableV2Signing = true
+            }
         }
     }
 
@@ -27,10 +40,14 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasReleaseKey) signingConfigs.getByName("releaseKey")
+                            else signingConfigs.getByName("debug")
         }
         debug {
             isMinifyEnabled = false
+            // 测试版也用固定密钥，避免不同 CI runner 各自生成 debug key 导致覆盖安装签名冲突
+            signingConfig = if (hasReleaseKey) signingConfigs.getByName("releaseKey")
+                            else signingConfigs.getByName("debug")
         }
     }
 
