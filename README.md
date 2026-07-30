@@ -91,6 +91,19 @@ gradle :app:assembleDebug --no-daemon
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
+## CI/CD 自动化构建
+
+仓库通过两条 GitHub Actions 流水线构建（设计细节见 [docs/ci-cd.md](docs/ci-cd.md)）：
+
+- **测试通道 `ci.yml`**：推 `main` / 开 PR / 手动触发，编译并产出 debug APK（artifact 保留 7 天），**不发版**。
+- **正式发行 `release.yml`**：打 `v*` tag 推送（或手动触发）时，构建 release + debug APK 并自动建 GitHub Release（标记为 Latest）。
+
+本地无 Android 环境时，直接推代码即可在 Actions 拿到构建产物；要发正式版执行：
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
 ## 使用示例
 
 输入布尔逻辑表达式（如 `~((A & B) | ((~c & ~d & ~e))) & f`），点击「生成」即可得到 MC/DC 真值表，支持横向/纵向滚动查看完整矩阵。

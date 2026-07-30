@@ -1,16 +1,23 @@
-name: Build APK
+name: Release
 
 on:
+  # 正式发行：打 v* tag 推送即发版（版本即 tag，语义清晰可追溯）
   push:
-    branches: [ main ]
+    tags:
+      - 'v*'
+  # 可选手动入口：在 Actions 页面点 Run workflow 填版本号也能发（不影响 tag 主逻辑）
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, e.g. 1.0.0'
+        required: true
 
-# GITHUB_TOKEN 默认只读；创建 Release 需要 contents: write 权限
+# 创建 GitHub Release 需要写权限
 permissions:
   contents: write
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -41,42 +48,36 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon
-
+      # 当前 build.gradle 已用 debug key 给 release 签名（够 sideload，不能上架）。
+      # 暂无正式签名密钥，因此这里直接 assembleRelease 即可。
+      # 日后要正式签名见 docs/ci-cd.md §6。
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon
 
-      - name: Upload Debug APK (Artifact)
-        uses: actions/upload-artifact@v4
-        with:
-          name: MCDC-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 30
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --no-daemon
 
-      - name: Upload Release APK (Artifact)
-        uses: actions/upload-artifact@v4
-        with:
-          name: MCDC-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
-          retention-days: 30
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=v${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
 
-      # 自动发布到 GitHub Releases：每次构建用唯一 tag（nightly-<run_number>）保留独立版本，
-      # 所有历史构建都会累积保留；最新的一个标记为 Latest 方便下载。
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: nightly-${{ github.run_number }}
-          name: Nightly Build (${{ github.run_number }})
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: MC/DC Generator ${{ steps.ver.outputs.tag }}
           prerelease: false
           make_latest: true
           files: |
-            app/build/outputs/apk/debug/app-debug.apk
             app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/apk/debug/app-debug.apk
           body: |
-            🤖 自动构建的 MC/DC 真值表生成器安装包
+            🚀 正式发行版本 ${{ steps.ver.outputs.tag }}
             - 提交: ${{ github.sha }}
-            - 构建序号: ${{ github.run_number }}
-            - Debug / Release 两个 APK 见下方 Assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
