@@ -22,10 +22,15 @@ class MainActivity : ComponentActivity() {
 
         // 让系统状态栏颜色与 App 背景一致（消除顶部灰条），并按深浅色切换图标明暗。
         // 与 MaterialTheme 默认 colorScheme.background 对齐：浅色 0xFFFDF8F6 / 深色 0xFF1B1B1F。
-        val isDark = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-            Configuration.UI_MODE_NIGHT_YES
-        window.statusBarColor = if (isDark) 0xFF1B1B1F.toInt() else 0xFFFDF8F6.toInt()
-        setLightStatusIcons(!isDark) // 浅色背景 -> 深色素图标，保证时间/电量清晰可读
+        // 不同厂商 ROM 对状态栏/Insets 接口兼容性不一，用 try/catch 兜底：美化失败绝不影响主功能。
+        try {
+            val isDark = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                Configuration.UI_MODE_NIGHT_YES
+            window.statusBarColor = if (isDark) 0xFF1B1B1F.toInt() else 0xFFFDF8F6.toInt()
+            setLightStatusIcons(!isDark) // 浅色背景 -> 深色素图标，保证时间/电量清晰可读
+        } catch (_: Throwable) {
+            // 静默忽略：状态栏配色是纯视觉增强，失败不应导致启动崩溃
+        }
 
         // 让渲染匹配设备原生刷新率（例如 120Hz 手机应跑满 120Hz，而非被限制到 60Hz）
         enableHighRefreshRate()
