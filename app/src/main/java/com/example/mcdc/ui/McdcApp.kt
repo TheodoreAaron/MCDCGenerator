@@ -72,6 +72,25 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.mcdc.model.McdcResult
 import com.example.mcdc.viewmodel.McdcUiState
 import com.example.mcdc.viewmodel.McdcViewModel
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
+import com.example.mcdc.algorithm.McdcAlgorithm
+import com.example.mcdc.algorithm.McdcParseException
+import com.example.mcdc.model.HistoryRecord
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private val CELL = 48.dp
 private val LABEL_W = 96.dp
@@ -88,22 +107,28 @@ private val LABEL_W = 96.dp
  *  │    冻结首行/首列             │
  *  └────────────────────────────┘
  */
+/** 应用内页面：主屏 / 历史列表。详情通过 selected 单独标记，优先级最高。 */
+private enum class Screen { Main, History }
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun McdcApp(viewModel: McdcViewModel = viewModel()) {
     val state by viewModel.uiState.collectAsState()
+    val history by viewModel.history.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val ctx = LocalContext.current
     val clipboard = remember(ctx) {
         ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     }
 
-    // 通过累加计数器触发 snackbar —— 每次成功复制都让 copyAckTick++ 一次
+    // 复制反馈：累加计數器触发 snackbar（真值表 / 表达式共用）
     var copyAckTick by remember { mutableStateOf(0) }
-    val onCopy: () -> Unit = onCopy@{
-        val r = state.result ?: return@onCopy
-        clipboard.setPrimaryClip(
-            ClipData.newPlainText("MC/DC truth table", formatAsTsv(r))
-        )
+    fun copyTsv(r: McdcResult) {
+        clipboard.setPrimaryClip(ClipData.newPlainText("MC/DC truth table", formatAsTsv(r)))
+        copyAckTick++
+    }
+    fun copyText(label: String, text: String) {
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
         copyAckTick++
     }
 
@@ -111,43 +136,316 @@ fun McdcApp(viewModel: McdcViewModel = viewModel()) {
         state.error?.let { snackbarHostState.showSnackbar(it) }
     }
     LaunchedEffect(copyAckTick) {
-        if (copyAckTick > 0) snackbarHostState.showSnackbar("✅ 已复制真值表到剪贴板")
+        if (copyAckTick > 0) snackbarHostState.showSnackbar("✅ 已复制到剪贴板")
     }
+
+    // 导航状态：主屏 / 历史列表 / 详情（selected 优先）
+    var screen by remember { mutableStateOf(Screen.Main) }
+    var selected by remember { mutableStateOf<HistoryRecord?>(null) }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        bottomBar = { QuickInsertBar(viewModel) },
+        topBar = {
+            when {
+                selected != null -> AppTopBar(title = "真值表详情", onBack = { selected = null })
+                screen == Screen.History -> AppTopBar(
+                    title = "历史记录",
+                    onBack = { screen = Screen.Main },
+                    onAction = { viewModel.clearHistory() },
+                    actionIcon = Icons.Filled.DeleteSweep,
+                    actionContentDesc = "清空历史",
+                )
+                else -> AppTopBar(
+                    title = "MC/DC 真值表生成器",
+                    onAction = { screen = Screen.History },
+                    actionIcon = Icons.Filled.History,
+                    actionContentDesc = "历史记录",
+                )
+            }
+        },
+        bottomBar = { if (screen == Screen.Main) QuickInsertBar(viewModel) },
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            InputPanel(
+        when {
+            selected != null -> DetailScreen(
+                record = selected!!,
+                padding = padding,
+                onCopyTsv = { copyTsv(it) },
+                onCopyExpr = { copyText("逻辑表达式", it) },
+            )
+            screen == Screen.History -> HistoryScreen(
+                history = history,
+                padding = padding,
+                onOpen = { selected = it },
+                onDelete = { viewModel.deleteHistory(it) },
+            )
+            else -> MainScreen(
                 state = state,
                 viewModel = viewModel,
-                onCopy = onCopy,
+                onCopy = { state.result?.let { copyTsv(it) } },
                 canCopy = state.result != null && !state.isLoading,
+                padding = padding,
             )
-            Box(modifier = Modifier.fillMaxSize().weight(1f)) {
-                when {
-                    state.isLoading -> CircularProgressIndicator(
-                        modifier = Modifier.align(Alignment.Center)
-                    )
-                    state.result != null -> MatrixView(result = state.result!!)
-                    else -> Text(
-                        text = "输入布尔逻辑表达式后点击「生成」",
-                        modifier = Modifier.align(Alignment.Center),
-                        color = MaterialTheme.colorScheme.outline,
-                        style = MaterialTheme.typography.bodyLarge,
-                    )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AppTopBar(
+    title: String,
+    onBack: (() -> Unit)? = null,
+    onAction: (() -> Unit)? = null,
+    actionIcon: ImageVector? = null,
+    actionContentDesc: String? = null,
+) {
+    TopAppBar(
+        title = {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        },
+        navigationIcon = {
+            if (onBack != null) {
+                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回") }
+            }
+        },
+        actions = {
+            if (actionIcon != null && onAction != null) {
+                IconButton(onClick = onAction) {
+                    Icon(actionIcon, contentDescription = actionContentDesc)
                 }
+            }
+        },
+        colors = TopAppBarDefaults.topAppBarColors(
+            containerColor = MaterialTheme.colorScheme.surface,
+        ),
+    )
+}
+
+@Composable
+private fun MainScreen(
+    state: McdcUiState,
+    viewModel: McdcViewModel,
+    onCopy: () -> Unit,
+    canCopy: Boolean,
+    padding: PaddingValues,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        InputPanel(
+            state = state,
+            viewModel = viewModel,
+            onCopy = onCopy,
+            canCopy = canCopy,
+        )
+        Box(modifier = Modifier.fillMaxSize()) {
+            when {
+                state.isLoading -> CircularProgressIndicator(
+                    modifier = Modifier.align(Alignment.Center)
+                )
+                state.result != null -> MatrixView(result = state.result)
+                else -> Text(
+                    text = "输入布尔逻辑表达式后点击「生成」",
+                    modifier = Modifier.align(Alignment.Center),
+                    color = MaterialTheme.colorScheme.outline,
+                    style = MaterialTheme.typography.bodyLarge,
+                )
             }
         }
     }
 }
+
+@Composable
+private fun HistoryScreen(
+    history: List<HistoryRecord>,
+    padding: PaddingValues,
+    onOpen: (HistoryRecord) -> Unit,
+    onDelete: (Long) -> Unit,
+) {
+    if (history.isEmpty()) {
+        Box(
+            modifier = Modifier.fillMaxSize().padding(padding),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "暂无历史记录\n生成真值表后会自动记录在这里",
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.outline,
+                style = MaterialTheme.typography.bodyLarge,
+            )
+        }
+        return
+    }
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        items(history, key = { it.createdAt }) { rec ->
+            HistoryCard(
+                rec = rec,
+                onClick = { onOpen(rec) },
+                onDelete = { onDelete(rec.createdAt) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun HistoryCard(
+    rec: HistoryRecord,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = rec.expression,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "起始基准：${if (rec.startFromTrue) "从 1 开始" else "从 0 开始"}  ·  ${formatTime(rec.createdAt)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+            IconButton(onClick = onDelete) {
+                Icon(
+                    Icons.Filled.Delete,
+                    contentDescription = "删除",
+                    tint = MaterialTheme.colorScheme.outline,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailScreen(
+    record: HistoryRecord,
+    padding: PaddingValues,
+    onCopyTsv: (McdcResult) -> Unit,
+    onCopyExpr: (String) -> Unit,
+) {
+    var result by remember { mutableStateOf<McdcResult?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    // 根据历史记录的表达式 + 起始基准实时重新生成真值表（不持久化整张表，结果永远准确）
+    LaunchedEffect(record.createdAt) {
+        isLoading = true
+        error = null
+        result = null
+        withContext(Dispatchers.Default) {
+            try {
+                result = McdcAlgorithm.generate(record.expression, record.startFromTrue)
+            } catch (e: McdcParseException) {
+                error = e.message
+            } catch (e: Exception) {
+                error = "计算失败：${e.message}"
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = record.expression,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { onCopyExpr(record.expression) },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        ),
+                    ) {
+                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("复制表达式", style = MaterialTheme.typography.titleSmall)
+                    }
+                    Button(
+                        onClick = { result?.let { onCopyTsv(it) } },
+                        enabled = result != null && !isLoading,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                        ),
+                    ) {
+                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("复制真值表", style = MaterialTheme.typography.titleSmall)
+                    }
+                }
+            }
+        }
+        Box(modifier = Modifier.fillMaxSize()) {
+            when {
+                isLoading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+                error != null -> Text(
+                    text = error!!,
+                    modifier = Modifier.align(Alignment.Center),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyLarge,
+                    textAlign = TextAlign.Center,
+                )
+                result != null -> MatrixView(result = result!!)
+                else -> Unit
+            }
+        }
+    }
+}
+
+/** 时间戳格式化为 yyyy-MM-dd HH:mm（本地时区）。 */
+private fun formatTime(ts: Long): String = try {
+    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(ts))
+} catch (_: Exception) { "" }
 
 /**
  * 输入面板：表达式输入框 + 起始基准切换 + 生成/复制按钮。
@@ -236,7 +534,7 @@ private fun InputPanel(
                     onClick = viewModel::generate,
                     enabled = !state.isLoading,
                     modifier = Modifier
-                        .weight(1f)
+                        .fillMaxWidth()
                         .height(56.dp),
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(
