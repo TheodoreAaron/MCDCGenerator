@@ -69,6 +69,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.activity.compose.BackHandler
 import com.example.mcdc.model.McdcResult
 import com.example.mcdc.viewmodel.McdcUiState
 import com.example.mcdc.viewmodel.McdcViewModel
@@ -142,6 +143,15 @@ fun McdcApp(viewModel: McdcViewModel = viewModel()) {
     // 导航状态：主屏 / 历史列表 / 详情（selected 优先）
     var screen by remember { mutableStateOf(Screen.Main) }
     var selected by remember { mutableStateOf<HistoryRecord?>(null) }
+
+    // 拦截系统返回手势 / 返回键：在应用内逐层返回，而不是直接 finish 掉 Activity 退出
+    // - 详情页 → 历史列表（清除 selected）
+    // - 历史列表 → 主屏（screen 回到 Main）
+    // - 主屏 → 不拦截，交给系统默认行为（退出 App）
+    BackHandler(enabled = selected != null || screen == Screen.History) {
+        if (selected != null) selected = null
+        else if (screen == Screen.History) screen = Screen.Main
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
