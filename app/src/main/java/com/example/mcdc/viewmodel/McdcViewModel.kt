@@ -1,11 +1,14 @@
 package com.example.mcdc.viewmodel
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.example.mcdc.algorithm.McdcAlgorithm
 import com.example.mcdc.algorithm.McdcParseException
+import com.example.mcdc.data.HistoryStore
+import com.example.mcdc.model.HistoryRecord
 import com.example.mcdc.model.McdcResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,10 +38,23 @@ data class McdcUiState(
  * 期间暴露 isLoading 供 UI 展示 CircularProgressIndicator；异常（语法/计算）
  * 捕获后通过 error 字段驱动 Snackbar，保证应用不崩溃（PRD §6/§7）。
  */
-class McdcViewModel : ViewModel() {
+class McdcViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val store = HistoryStore(application)
 
     private val _uiState = MutableStateFlow(McdcUiState())
     val uiState: StateFlow<McdcUiState> = _uiState.asStateFlow()
+
+    /** 历史记录（新→旧）。生成成功时自动追加，删除/清空时同步更新。 */
+    private val _history = MutableStateFlow<List<HistoryRecord>>(emptyList())
+    val history: StateFlow<List<HistoryRecord>> = _history.asStateFlow()
+
+    init {
+        // 启动时从本地文件加载历史，保证跨会话保留
+        viewModelScope.launch(Dispatchers.IO) {
+            _history.value = store.load()
+        }
+    }
 
     /**
      * 用户直接在 TextField 中输入时回调。
@@ -96,9 +112,12 @@ class McdcViewModel : ViewModel() {
             return
         }
         _uiState.update { it.copy(isLoading = true, error = null) }
+        val startFromTrue = _uiState.value.startFromTrue
         viewModelScope.launch(Dispatchers.Default) {
             try {
-                val result = McdcAlgorithm.generate(expr, _uiState.value.startFromTrue)
+                val result = McdcAlgorithm.generate(expr, startFromTrue)
+                // 生成成功 → 写入历史（按 expr+基准去重置顶），并刷新历史流
+                _history.value = store.record(expr, startFromTrue)
                 _uiState.update { it.copy(isLoading = false, result = result, error = null) }
             } catch (e: McdcParseException) {
                 _uiState.update { it.copy(isLoading = false, error = e.message, result = null) }
@@ -107,6 +126,20 @@ class McdcViewModel : ViewModel() {
                     it.copy(isLoading = false, error = "计算失败：${e.message}", result = null)
                 }
             }
+        }
+    }
+
+    /** 删除单条历史记录。 */
+    fun deleteHistory(createdAt: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _history.value = store.delete(createdAt)
+        }
+    }
+
+    /** 清空全部历史记录。 */
+    fun clearHistory() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _history.value = store.clear()
         }
     }
 }
