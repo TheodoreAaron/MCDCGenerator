@@ -7,9 +7,11 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.example.mcdc.algorithm.McdcAlgorithm
 import com.example.mcdc.algorithm.McdcParseException
+import com.example.mcdc.data.HistoryBackup
 import com.example.mcdc.data.HistoryStore
 import com.example.mcdc.model.HistoryRecord
 import com.example.mcdc.model.McdcResult
+import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -40,7 +42,11 @@ data class McdcUiState(
  */
 class McdcViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val store = HistoryStore(application)
+    private val backup = HistoryBackup(application)
+    private val store = HistoryStore(application, backup)
+
+    /** 暴露给 UI 用于发起「选择备份文件夹」选择器。 */
+    val historyBackup: HistoryBackup get() = backup
 
     private val _uiState = MutableStateFlow(McdcUiState())
     val uiState: StateFlow<McdcUiState> = _uiState.asStateFlow()
@@ -141,5 +147,22 @@ class McdcViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             _history.value = store.clear()
         }
+    }
+
+    // ───────────── 历史备份（共享存储，覆盖安装/重装安全） ─────────────
+
+    /** 是否仍需要用户选择备份文件夹。 */
+    fun needsBackupFolder(): Boolean = !backup.hasBackupFolder()
+
+    /**
+     * 处理「选择备份文件夹」的结果：持久化授权，并立即把当前历史同步进共享存储。
+     * 返回是否成功获得可写授权。
+     */
+    fun onBackupFolderPicked(uri: Uri?): Boolean {
+        val ok = backup.onPickerResult(uri)
+        if (ok) {
+            viewModelScope.launch(Dispatchers.IO) { store.backupNow() }
+        }
+        return ok
     }
 }

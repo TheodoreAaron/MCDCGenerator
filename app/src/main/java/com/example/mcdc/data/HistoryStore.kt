@@ -12,22 +12,40 @@ import java.io.File
  * 设计取舍（见需求文档）：
  * - 记录结构简单（表达式字符串 + 布尔 + 长整型时间戳），手动读写 JSON 即可，
  *   刻意不引入 kotlinx-serialization / Room，避免给构建链增加依赖与配置风险。
- * - 数据存于应用私有目录 `context.filesDir/mcdc_history.json`，随应用卸载清除，无需权限。
+ * - 主存储仍是应用私有目录 `context.filesDir/mcdc_history.json`（读写即时、无需权限）。
+ * - **额外**把历史同步到共享存储（[HistoryBackup]，用户选定的文件夹，如 Documents/MCDC），
+ *   该位置不随应用卸载 / 覆盖安装（签名不一致导致强制重装）而清除，从而彻底解决
+ *   “装上新版后旧记录丢失”的问题。加载时若主存储为空，会自动从共享备份恢复。
  * - 按 (expression, startFromTrue) 去重：同一表达式以相同基准重复生成只保留最新一条（置顶）；
  *   最多保留 [MAX_ENTRIES] 条，防止无限增长。
- * - 所有文件 IO 在 [Dispatchers.IO] 上执行，避免阻塞主线程。
+ * - 所有文件 IO 在 [Dispatchers.IO] 上执行，避免阻塞主线程；备份失败静默忽略。
  */
-class HistoryStore(context: Context) {
+class HistoryStore(context: Context, private val backup: HistoryBackup) {
 
     private val file = File(context.filesDir, "mcdc_history.json")
 
     /** 最多保留的条目数。 */
     private val MAX_ENTRIES = 200
 
-    /** 读取全部历史（按文件中顺序返回，调用方约定为「新→旧」）。文件缺失/损坏时返回空列表。 */
+    /**
+     * 读取全部历史（按文件中顺序返回，调用方约定为「新→旧」）。
+     * 优先读主存储；若主存储为空/损坏，则尝试从共享备份恢复并同步回主存储，
+     * 这样覆盖安装/重装后历史仍能找回。两者皆空时返回空列表。
+     */
     suspend fun load(): List<HistoryRecord> = withContext(Dispatchers.IO) {
-        if (!file.exists()) return@withContext emptyList()
-        runCatching { parse(file.readText()) }.getOrDefault(emptyList())
+        val local = if (file.exists()) runCatching { parse(file.readText()) }.getOrDefault(emptyList())
+                    else emptyList()
+        if (local.isNotEmpty()) return@withContext local
+
+        val restored = backup.read()
+            ?.let { runCatching { parse(it) }.getOrDefault(emptyList()) }
+            .orEmpty()
+        if (restored.isNotEmpty()) {
+            runCatching { file.writeText(serialize(restored)) } // 同步回主存储
+            restored
+        } else {
+            emptyList()
+        }
     }
 
     /**
@@ -58,8 +76,18 @@ class HistoryStore(context: Context) {
         return emptyList()
     }
 
+    /** 写入主存储，并（在已配置备份文件夹时）同步到共享存储。 */
     private suspend fun save(records: List<HistoryRecord>) = withContext(Dispatchers.IO) {
-        runCatching { file.writeText(serialize(records)) }
+        val text = serialize(records)
+        runCatching { file.writeText(text) }
+        backup.write(text)
+    }
+
+    /** 立即把当前主存储内容同步到共享备份（用户首次选定备份文件夹后调用）。 */
+    suspend fun backupNow() {
+        if (!file.exists()) return
+        val text = runCatching { file.readText() }.getOrNull() ?: return
+        backup.write(text)
     }
 
     private fun dedupeKey(e: String, s: Boolean) = "${if (s) 1 else 0}:$e"

@@ -3,6 +3,9 @@ package com.example.mcdc.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -37,6 +40,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -122,6 +126,22 @@ fun McdcApp(viewModel: McdcViewModel = viewModel()) {
         ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     }
 
+    // 共享存储备份：用户首次（或授权丢失后）需选择一个文件夹，历史即可在覆盖安装/重装后保留
+    var showBackupDialog by remember { mutableStateOf(false) }
+    var backupMsgTick by remember { mutableStateOf(0) }
+    val treeLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        val ok = viewModel.onBackupFolderPicked(uri)
+        if (ok) backupMsgTick++ else showBackupDialog = true // 未获得授权则再次提示
+    }
+    LaunchedEffect(Unit) {
+        if (viewModel.needsBackupFolder()) showBackupDialog = true
+    }
+    LaunchedEffect(backupMsgTick) {
+        if (backupMsgTick > 0) snackbarHostState.showSnackbar("✅ 已开启历史备份，更新/重装后记录不丢失")
+    }
+
     // 复制反馈：累加计數器触发 snackbar（真值表 / 表达式共用）
     var copyAckTick by remember { mutableStateOf(0) }
     fun copyTsv(r: McdcResult) {
@@ -196,6 +216,29 @@ fun McdcApp(viewModel: McdcViewModel = viewModel()) {
                 padding = padding,
             )
         }
+    }
+
+    // 首次启动（或备份授权丢失）时，提示用户选择一个共享备份文件夹
+    if (showBackupDialog) {
+        AlertDialog(
+            onDismissRequest = { showBackupDialog = false },
+            title = { Text("开启历史备份") },
+            text = {
+                Text(
+                    "为了让「覆盖安装 / 重装 App」后历史记录不丢失，需要选择一个备份位置（只需一次，建议选“文档”）。\n\n" +
+                    "之后历史会自动保存在该文件夹的 MCDC 目录中，不随 App 卸载而删除。"
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showBackupDialog = false
+                    viewModel.historyBackup.launchPicker(treeLauncher)
+                }) { Text("去选择") }
+            },
+            dismissButton = {
+                Button(onClick = { showBackupDialog = false }) { Text("暂时跳过") }
+            },
+        )
     }
 }
 
